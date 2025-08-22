@@ -1,6 +1,7 @@
 // --- Pieza 1: Las Herramientas ---
 const express = require('express');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 const cors = require('cors');
 
@@ -8,29 +9,12 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 app.use(express.json());
-
 const PORT = 3000;
 
-// --- "ARCHIVADOR" / BASE DE DATOS FALSA ---
-const fakeMemberDatabase = {
-    "user_mikel": { 
-        nombre: "Mikel", 
-        numero_socio: "101010", 
-        estado_cuota: "Pagada", 
-        proximo_pago: "01/08/2026", 
-        localidad: "Tribuna Principal Alta, Fila 5, Asiento 12",
-        antiguedad: "15 años"
-    }
-};
-const fakeTicketDatabase = [
-    { id: 1, partido: "Real Sociedad vs FC Barcelona", fecha: "14 SEP 2025", zona: "Tribuna Este Alta", precio: 95, vendedor: "Iñigo M." },
-    { id: 2, partido: "Real Sociedad vs Real Madrid", fecha: "05 OCT 2025", zona: "Fondo Aitor Zabaleta", precio: 110, vendedor: "Ane G." },
-];
-const fakeMerchandiseDatabase = [
-    { id: 101, nombre: "Camiseta Local 25/26", precio: 89.95, url: "https://tienda.realsociedad.eus/es/camiseta-local" },
-    { id: 103, nombre: "Bufanda Txuri-Urdin", precio: 25.00, url: "https://tienda.realsociedad.eus/es/bufanda" },
-];
-// ---------------------------------------------
+// --- Conexión a la Base de Datos (Supabase) ---
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // --- Configuración de la Inteligencia (Gemini) ---
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -40,15 +24,20 @@ const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 app.post('/chat', async (req, res) => {
   try {
     const userMessage = req.body.message;
+    const currentUserId = 101010; 
+
     if (!userMessage) {
       return res.status(400).json({ error: 'No se ha proporcionado ningún mensaje.' });
     }
 
-    // --- PASO 1: CLASIFICAR LA INTENCIÓN DEL USUARIO ---
+    // --- PASO 1: CLASIFICAR LA INTENCIÓN DEL USUARIO (VERSIÓN MEJORADA) ---
     const classifierPrompt = `
-      Analiza la siguiente pregunta de un usuario y clasifícala en una de estas dos categorías:
-      1. "DATOS_PRIVADOS": si la pregunta es sobre información personal del socio, entradas o productos de la tienda (ej: "¿cuánto pago?", "¿qué entradas hay?", "¿cuál es mi número de socio?").
-      2. "CONOCIMIENTO_GENERAL": si la pregunta es sobre la historia del club, jugadores, estadio, o cualquier otra cosa que no sea información personal (ej: "¿quién es el máximo goleador?", "¿cuándo se fundó el club?").
+      Analiza la pregunta del usuario y clasifícala en una de estas dos categorías:
+      1. "DATOS_PRIVADOS": Si la pregunta trata sobre información personal del socio (cuota, antigüedad, puntos, número de socio), o si pregunta específicamente por entradas a la venta, precios de entradas para partidos concretos, o productos de la tienda.
+         EJEMPLOS: "¿cuánto pago?", "¿qué entradas hay a la venta?", "¿cuánto vale una entrada para el próximo partido?", "¿cuánto cuesta la camiseta?".
+      2. "CONOCIMIENTO_GENERAL": Si la pregunta es sobre la historia del club, jugadores, estadio, resultados, o cualquier otra cosa que no sea una consulta directa sobre los datos de venta o del socio.
+         EJEMPLOS: "¿quién es el máximo goleador?", "¿cuándo se fundó el club?", "¿cómo quedó el último partido?".
+
       Responde únicamente con la palabra "DATOS_PRIVADOS" o "CONOCIMIENTO_GENERAL".
 
       Pregunta del usuario: "${userMessage}"
@@ -61,28 +50,27 @@ app.post('/chat', async (req, res) => {
 
     // --- PASO 2: RESPONDER SEGÚN LA INTENCIÓN CLASIFICADA ---
     if (intent === "DATOS_PRIVADOS") {
-      // Si la intención es privada, construimos un prompt solo con los datos privados.
-      const memberDataString = JSON.stringify(fakeMemberDatabase["user_mikel"]);
-      const ticketDataString = JSON.stringify(fakeTicketDatabase);
-      const merchDataString = JSON.stringify(fakeMerchandiseDatabase);
-
+      const { data: memberData } = await supabase.from('socios').select('*').eq('id_socio', currentUserId).single();
+      const { data: ticketData } = await supabase.from('asientos_liberados').select('*, partidos(*)'); // Pedimos también la info del partido
+      const { data: merchData } = await supabase.from('productos').select('*');
+      
       const privateDataPrompt = `
-        **INSTRUCCIONES:** Eres 'FAN IA'. Responde a la pregunta del usuario basándote ESTRICTA y ÚNICAMENTE en el siguiente contexto de datos. No uses ningún otro conocimiento. Si los datos no contienen la respuesta, di que no tienes esa información. Para productos, incluye el enlace de compra en formato Markdown: [Nombre](url).
+        **INSTRUCCIONES:** Eres 'FAN IA'. Responde a la pregunta del usuario de forma directa y concisa, basándote ESTRICTA y ÚNICAMENTE en el siguiente contexto de datos. No añadas información de relleno. Para productos, incluye el enlace de compra en formato Markdown: [Nombre](url).
 
         **CONTEXTO DE DATOS:**
-        - DATOS_SOCIO: ${memberDataString}
-        - ENTRADAS_DISPONIBLES: ${ticketDataString}
-        - PRODUCTOS_TIENDA: ${merchDataString}
+        - DATOS_SOCIO: ${JSON.stringify(memberData)}
+        - ENTRADAS_DISPONIBLES: ${JSON.stringify(ticketData)}
+        - PRODUCTOS_TIENDA: ${JSON.stringify(merchData)}
         ---
         **PREGUNTA DEL USUARIO:** "${userMessage}"
       `;
       const privateResult = await model.generateContent(privateDataPrompt);
       finalResponseText = await privateResult.response.text();
 
-    } else { // Si la intención es CONOCIMIENTO_GENERAL (o cualquier otra cosa por seguridad)
-      // Construimos un prompt simple, sin datos privados que puedan confundir.
+    } else { 
+      const today = new Date().toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' });
       const generalKnowledgePrompt = `
-        **INSTRUCCIONES:** Eres 'FAN IA', un asistente experto en la Real Sociedad. Responde a la siguiente pregunta del usuario usando tu conocimiento general sobre el club. Tu tono debe ser amable y servicial.
+        **INSTRUCCIONES:** Eres 'FAN IA', un asistente experto en la Real Sociedad. Responde a la pregunta del usuario de forma directa y concisa. Si te preguntan por el próximo partido, busca el siguiente partido real en el calendario. Considera que la fecha de hoy es ${today}.
         ---
         **PREGUNTA DEL USUARIO:** "${userMessage}"
       `;
@@ -100,5 +88,5 @@ app.post('/chat', async (req, res) => {
 
 // --- Puesta en Marcha ---
 app.listen(PORT, () => {
-  console.log(`✅ ¡Motor con Lógica Profesional arrancado! Escuchando en el puerto ${PORT}.`);
+  console.log(`✅ ¡Motor con Clasificador Mejorado arrancado! Escuchando en el puerto ${PORT}.`);
 });
