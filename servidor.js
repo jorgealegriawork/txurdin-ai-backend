@@ -11,6 +11,14 @@ app.use(cors());
 app.use(express.json());
 const PORT = 3000;
 
+// --- PANEL DE DIAGNÓSTICO ---
+// Estas líneas nos dirán si el motor está encontrando las claves en Render.
+console.log("Iniciando motor...");
+console.log("SUPABASE_URL encontrada:", process.env.SUPABASE_URL ? "Sí" : "No");
+console.log("SUPABASE_KEY encontrada:", process.env.SUPABASE_KEY ? "Sí" : "No");
+console.log("GEMINI_API_KEY encontrada:", process.env.GEMINI_API_KEY ? "Sí" : "No");
+// -----------------------------------------------------------
+
 // --- Conexión a la Base de Datos (Supabase) ---
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
@@ -79,4 +87,9 @@ app.post('/chat', async (req, res) => {
     console.error('Error en la ruta /chat:', error);
     res.status(500).json({ error: 'Ha ocurrido un error en el servidor.' });
   }
+});
+
+// --- Puesta en Marcha ---
+app.listen(PORT, () => {
+  console.log(`✅ ¡Motor con Lógica Estricta arrancado! Escuchando en el puerto ${PORT}.`);
 });
