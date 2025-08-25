@@ -20,7 +20,7 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash"});
 
-// --- Ruta de Chat con Lógica Profesional ---
+// --- Ruta de Chat con Lógica Profesional Definitiva ---
 app.post('/chat', async (req, res) => {
   try {
     const userMessage = req.body.message;
@@ -30,53 +30,48 @@ app.post('/chat', async (req, res) => {
       return res.status(400).json({ error: 'No se ha proporcionado ningún mensaje.' });
     }
 
-    // --- PASO 1: CLASIFICAR LA INTENCIÓN DEL USUARIO (VERSIÓN MEJORADA) ---
-    const classifierPrompt = `
-      Analiza la pregunta del usuario y clasifícala en una de estas dos categorías:
-      1. "DATOS_PRIVADOS": Si la pregunta trata sobre información personal del socio (cuota, antigüedad, puntos, número de socio), o si pregunta específicamente por entradas a la venta, precios de entradas para partidos concretos, o productos de la tienda.
-         EJEMPLOS: "¿cuánto pago?", "¿qué entradas hay a la venta?", "¿cuánto vale una entrada para el próximo partido?", "¿cuánto cuesta la camiseta?".
-      2. "CONOCIMIENTO_GENERAL": Si la pregunta es sobre la historia del club, jugadores, estadio, resultados, o cualquier otra cosa que no sea una consulta directa sobre los datos de venta o del socio.
-         EJEMPLOS: "¿quién es el máximo goleador?", "¿cuándo se fundó el club?", "¿cómo quedó el último partido?".
+    // --- Recopilamos todo el contexto de la base de datos ---
+    const { data: memberData } = await supabase.from('socios').select('*').eq('id_socio', currentUserId).single();
+    const { data: ticketData } = await supabase.from('asientos_liberados').select('*');
+    const { data: merchData } = await supabase.from('productos').select('*');
+    const { data: partidosData } = await supabase.from('partidos').select('*');
 
-      Responde únicamente con la palabra "DATOS_PRIVADOS" o "CONOCIMIENTO_GENERAL".
+    // --- El Prompt Maestro Definitivo y Estricto ---
+    const masterPrompt = `
+      **ROL Y OBJETIVO:**
+      Eres 'FAN IA', un asistente de consulta de datos para un club de fútbol. Tu única función es responder a la pregunta del usuario basándote ESTRICTA Y EXCLUSIVAMENTE en el **CONTEXTO DE DATOS** en formato JSON que te proporciono.
 
-      Pregunta del usuario: "${userMessage}"
+      **REGLAS DE ORO (OBLIGATORIAS):**
+      1. **FUENTE ÚNICA DE VERDAD:** El **CONTEXTO DE DATOS** es tu única fuente de información. No puedes usar tu conocimiento general. No puedes inventar datos.
+      2. **RESPUESTA DIRECTA:** Responde de forma concisa y directa a la pregunta del usuario.
+         - Si te preguntan por "mi numero de socio", busca el campo "id_socio" en DATOS_SOCIO.
+         - Si te preguntan por el precio de una camiseta, busca en PRODUCTOS_TIENDA.
+         - Si te preguntan por entradas, busca en ENTRADAS_DISPONIBLES.
+      3. **MANEJO DE ERRORES:** Si la respuesta a la pregunta del usuario no se encuentra en el CONTEXTO DE DATOS, DEBES responder única y exclusivamente con la frase: "No dispongo de esa información en este momento."
+
+      ---
+      **CONTEXTO DE DATOS (Fuente de Verdad):**
+
+      **DATOS_SOCIO (El usuario que pregunta):**
+      ${JSON.stringify(memberData)}
+
+      **ENTRADAS_DISPONIBLES (Asientos que otros socios venden):**
+      ${JSON.stringify(ticketData)}
+
+      **PRODUCTOS_TIENDA:**
+      ${JSON.stringify(merchData)}
+
+      **PARTIDOS_PROGRAMADOS:**
+      ${JSON.stringify(partidosData)}
+      ---
+
+      **PREGUNTA DEL USUARIO A RESPONDER:**
+      "${userMessage}"
     `;
-    
-    const classificationResult = await model.generateContent(classifierPrompt);
-    const intent = (await classificationResult.response.text()).trim();
 
-    let finalResponseText;
-
-    // --- PASO 2: RESPONDER SEGÚN LA INTENCIÓN CLASIFICADA ---
-    if (intent === "DATOS_PRIVADOS") {
-      const { data: memberData } = await supabase.from('socios').select('*').eq('id_socio', currentUserId).single();
-      const { data: ticketData } = await supabase.from('asientos_liberados').select('*, partidos(*)'); // Pedimos también la info del partido
-      const { data: merchData } = await supabase.from('productos').select('*');
-      
-      const privateDataPrompt = `
-        **INSTRUCCIONES:** Eres 'FAN IA'. Responde a la pregunta del usuario de forma directa y concisa, basándote ESTRICTA y ÚNICAMENTE en el siguiente contexto de datos. No añadas información de relleno. Para productos, incluye el enlace de compra en formato Markdown: [Nombre](url).
-
-        **CONTEXTO DE DATOS:**
-        - DATOS_SOCIO: ${JSON.stringify(memberData)}
-        - ENTRADAS_DISPONIBLES: ${JSON.stringify(ticketData)}
-        - PRODUCTOS_TIENDA: ${JSON.stringify(merchData)}
-        ---
-        **PREGUNTA DEL USUARIO:** "${userMessage}"
-      `;
-      const privateResult = await model.generateContent(privateDataPrompt);
-      finalResponseText = await privateResult.response.text();
-
-    } else { 
-      const today = new Date().toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' });
-      const generalKnowledgePrompt = `
-        **INSTRUCCIONES:** Eres 'FAN IA', un asistente experto en la Real Sociedad. Responde a la pregunta del usuario de forma directa y concisa. Si te preguntan por el próximo partido, busca el siguiente partido real en el calendario. Considera que la fecha de hoy es ${today}.
-        ---
-        **PREGUNTA DEL USUARIO:** "${userMessage}"
-      `;
-      const generalResult = await model.generateContent(generalKnowledgePrompt);
-      finalResponseText = await generalResult.response.text();
-    }
+    const result = await model.generateContent(masterPrompt);
+    const response = await result.response;
+    const finalResponseText = response.text();
 
     res.json({ reply: finalResponseText });
 
@@ -84,9 +79,4 @@ app.post('/chat', async (req, res) => {
     console.error('Error en la ruta /chat:', error);
     res.status(500).json({ error: 'Ha ocurrido un error en el servidor.' });
   }
-});
-
-// --- Puesta en Marcha ---
-app.listen(PORT, () => {
-  console.log(`✅ ¡Motor con Clasificador Mejorado arrancado! Escuchando en el puerto ${PORT}.`);
 });
